@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Object Visibility</title>
+    <script>
+        // SunCalc v1.8.0 - https://github.com/mourner/suncalc
+        // BSD-2-Clause license
+        const PI   = Math.PI,
+            sin  = Math.sin,
+            cos  = Math.cos,
+            tan  = Math.tan,
+            asin = Math.asin,
+            atan = Math.atan2,
+            acos = Math.acos,
+            rad  = PI / 180;
+        const dayMs = 1000 * 60 * 60 * 24,
+            J1970 = 2440588,
+            J2000 = 2451545;
+        function toJulian(date) { return date.valueOf() / dayMs - 0.5 + J1970; }
+        function fromJulian(j)  { return new Date((j + 0.5 - J1970) * dayMs); }
+        function toDays(date)   { return toJulian(date) - J2000; }
+        const e = rad * 23.4397; // obliquity of the Earth
+        function rightAscension(l, b) { return atan(sin(l) * cos(e) - tan(b) * sin(e), cos(l)); }
+        function declination(l, b)    { return asin(sin(b) * cos(e) + cos(b) * sin(e) * sin(l)); }
+        function azimuth(H, phi, dec)  { return atan(sin(H), cos(H) * sin(phi) - tan(dec) * cos(phi)); }
+        function altitude(H, phi, dec) { return asin(sin(phi) * sin(dec) + cos(phi) * cos(dec) * cos(H)); }
+        function siderealTime(d, lw) { return rad * (280.16 + 360.9856235 * d) - lw; }
+        function astroRefraction(h) {
+            if (h < 0) h = 0;
+            return 0.0002967 / Math.tan(h + 0.00312536 / (h + 0.08901179));
+        }
+        function solarMeanAnomaly(d) { return rad * (357.5291 + 0.98560028 * d); }
+        function eclipticLongitude(M) {
+            const C = rad * (1.9148 * sin(M) + 0.02 * sin(2 * M) + 0.0003 * sin(3 * M)),
+                P = rad * 102.9372;
+            return M + C + P + PI;
+        }
+        function sunCoords(d) {
+            const M = solarMeanAnomaly(d), L = eclipticLongitude(M);
+            return { dec: declination(L, 0), ra: rightAscension(L, 0) };
+        }
+        var SunCalc = {};
+        SunCalc.getPosition = function (date, lat, lng) {
+            const lw  = rad * -lng, phi = rad * lat, d = toDays(date),
+                c  = sunCoords(d), H  = siderealTime(d, lw) - c.ra;
+            return { azimuth: azimuth(H, phi, c.dec), altitude: altitude(H, phi, c.dec) };
+        };
+        const times = SunCalc.times = [
+            [-0.833, 'sunrise',       'sunset'      ],
+            [ -0.3, 'sunriseEnd',    'sunsetStart' ],
+            [   -6, 'dawn',          'dusk'        ],
+            [  -12, 'nauticalDawn',  'nauticalDusk'],
+            [  -18, 'nightEnd',      'night'       ],
+            [    6, 'goldenHourEnd', 'goldenHour'  ]
+        ];
+        SunCalc.addTime = function (angle, riseName, setName) { times.push([angle, riseName, setName]); };
+        const J0 = 0.0009;
+        function julianCycle(d, lw) { return Math.round(d - J0 - lw / (2 * PI)); }
+        function approxTransit(Ht, lw, n) { return J0 + (Ht + lw) / (2 * PI) + n; }
+        function solarTransitJ(ds, M, L)  { return J2000 + ds + 0.0053 * sin(M) - 0.0069 * sin(2 * L); }
+        function hourAngle(h, phi, d) { return acos((sin(h) - sin(phi) * sin(d)) / (cos(phi) * cos(d))); }
+        function observerAngle(height) { return -2.076 * Math.sqrt(height) / 60; }
+        function getSetJ(h, lw, phi, dec, n, M, L) {
+            const w = hourAngle(h, phi, dec), a = approxTransit(w, lw, n);
+            return solarTransitJ(a, M, L);
+        }
+        SunCalc.getTimes = function (date, lat, lng, height) {
+            height = height || 0;
+            const lw = rad * -lng, phi = rad * lat, dh = observerAngle(height),
+                d = toDays(date), n = julianCycle(d, lw), ds = approxTransit(0, lw, n),
+                M = solarMeanAnomaly(ds), L = eclipticLongitude(M), dec = declination(L, 0),
+                Jnoon = solarTransitJ(ds, M, L);
+            let result = { solarNoon: fromJulian(Jnoon), nadir: fromJulian(Jnoon - 0.5) };
+            for (let i = 0, len = times.length; i < len; i += 1) {
+                const time = times[i];
+                const h0 = (time[0] + dh) * rad;
+                const Jset = getSetJ(h0, lw, phi, dec, n, M, L);
+                const Jrise = Jnoon - (Jset - Jnoon);
+                result[time[1]] = fromJulian(Jrise);
+                result[time[2]] = fromJulian(Jset);
+            }
+            return result;
+        };
+        function moonCoords(d) {
+            const L = rad * (218.316 + 13.176396 * d), M = rad * (134.963 + 13.064993 * d), F = rad * (93.272 + 13.229350 * d),
+                l  = L + rad * 6.289 * sin(M), b  = rad * 5.128 * sin(F), dt = 385001 - 20905 * cos(M);
+            return { ra: rightAscension(l, b), dec: declination(l, b), dist: dt };
+        }
+        SunCalc.getMoonPosition = function (date, lat, lng) {
+            const lw = rad * -lng, phi = rad * lat, d = toDays(date),
+                c = moonCoords(d), H = siderealTime(d, lw) - c.ra, h = altitude(H, phi, c.dec),
+                pa = atan(sin(H), tan(phi) * cos(c.dec) - sin(c.dec) * cos(H));
+            return {
+                azimuth: azimuth(H, phi, c.dec),
+                altitude: h + astroRefraction(h),
+                distance: c.dist,
+                parallacticAngle: pa
+            };
+        };
+        SunCalc.getMoonIllumination = function (date) {
+            const d = toDays(date || new Date()), s = sunCoords(d), m = moonCoords(d),
+                sdist = 149598000,
+                phi = acos(sin(s.dec) * sin(m.dec) + cos(s.dec) * cos(m.dec) * cos(s.ra - m.ra)),
+                inc = atan(sdist * sin(phi), m.dist - sdist * cos(phi)),
+                angle = atan(cos(s.dec) * sin(s.ra - m.ra), sin(s.dec) * cos(m.dec) - cos(s.dec) * sin(m.dec) * cos(s.ra - m.ra));
+            return {
+                fraction: (1 + cos(inc)) / 2,
+                phase: 0.5 + 0.5 * inc * (angle < 0 ? -1 : 1) / PI,
+                angle: angle
+            };
+        };
+        function hoursLater(date, h) { return new Date(date.valueOf() + h * dayMs / 24); }
+        SunCalc.getMoonTimes = function (date, lat, lng, inUTC) {
+            const t = new Date(date);
+            if (inUTC) t.setUTCHours(0, 0, 0, 0);
+            else t.setHours(0, 0, 0, 0);
+            const hc = 0.133 * rad;
+            let h0 = SunCalc.getMoonPosition(t, lat, lng).altitude - hc, rise, set, ye;
+            for (let i = 1; i <= 24; i += 2) {
+                const h1 = SunCalc.getMoonPosition(hoursLater(t, i), lat, lng).altitude - hc;
+                const h2 = SunCalc.getMoonPosition(hoursLater(t, i + 1), lat, lng).altitude - hc;
+                const a = (h0 + h2) / 2 - h1, b = (h2 - h0) / 2, xe = -b / (2 * a),
+                    d = b * b - 4 * a * h1;
+                let roots = 0, x1, x2;
+                ye = (a * xe + b) * xe + h1;
+                if (d >= 0) {
+                    const dx = Math.sqrt(d) / (Math.abs(a) * 2);
+                    x1 = xe - dx;
+                    x2 = xe + dx;
+                    if (Math.abs(x1) <= 1) roots++;
+                    if (Math.abs(x2) <= 1) roots++;
+                    if (x1 < -1) x1 = x2;
+                }
+                if (roots === 1) {
+                    if (h0 < 0) rise = i + x1;
+                    else set = i + x1;
+                } else if (roots === 2) {
+                    rise = i + (ye < 0 ? x2 : x1);
+                    set = i + (ye < 0 ? x1 : x2);
+                }
+                if (rise && set) break;
+                h0 = h2;
+            }
+            let result = {};
+            if (rise) result.rise = hoursLater(t, rise);
+            if (set) result.set = hoursLater(t, set);
+            if (!rise && !set) result[ye > 0 ? 'alwaysUp' : 'alwaysDown'] = true;
+            return result;
+        };
+    </script>
+    <script>
+        // Orb.js v2.4.0 - https://github.com/lizard-isana/orb.js
+        // MIT License
+        var Orb = Orb || {
+            VERSION: "2.4.0 (20200707)",
+            AUTHOR: "Isana Kashiwai",
+            LICENSE: "MIT"
+        };
+        Orb.Constant = Orb.Constant || {
+            "PI": Math.PI,
+            "RAD": Math.PI / 180,
+            "AU": 149597870.700,
+            "RE": 6378.137,
+            "LD": 384000,
+            "LY": Number("9.46073E+12"),
+            "PC": Number("3.08568E+13"),
+            "G": Number("6.6740831E-11"),
+            "GM": Number("2.9591220828559093E-4"),
+            "Planets": ["Sun", "Mercury", "Venus", "Earth", "Moon", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"],
+            "Sun": { "radius": 1392038 / 2, "obliquity": 7.25, "mass": Number("1.989E+30"), "gm": Number("1.327124400189E+11") },
+            "Mercury": { "radius": 4879.4 / 2, "obliquity": 0.027, "mass": Number("3.301E+23"), "gm": 220329 },
+            "Venus": { "radius": 12103.6 / 2, "obliquity": 177.36, "mass": Number("4.867E+24"), "gm": 3248599 },
+            "Earth": { "radius": 12756.3 / 2, "obliquity": 23.435, "mass": Number("5.972E+24"), "gm": Number("3.9860044189E+5") },
+            "Moon": { "radius": 1737.4, "obliquity": 1.5424, "mass": Number("7.346E+22"), "gm": 4904.86959 },
+            "Mars": { "radius": 6794.4 / 2, "obliquity": 25, "mass": Number("6.417E+24"), "gm": 42828.9 },
+            "Jupiter": { "radius": 142984 / 2, "obliquity": 3.08, "mass": Number("1.899E+27"), "gm": 1266865349 },
+            "Saturn": { "radius": 120536 / 2, "obliquity": 26.7, "mass": Number("5.685E+26"), "gm": 379311879 },
+            "Uranus": { "radius": 51118 / 2, "obliquity": 97.9, "mass": Number("8.682E+26"), "gm": 57939399 },
+            "Neptune": { "radius": 49572 / 2, "obliquity": 29.6, "mass": Number("1.024E+26"), "gm": 68365299 }
+        };
+        Orb.Time = function(date) {
+            var d = date || new Date();
+            this.date = d;
+            this.year = d.getUTCFullYear();
+            this.month = d.getUTCMonth() + 1;
+            this.day = d.getUTCDate();
+            this.hours = d.getUTCHours();
+            this.minutes = d.getUTCMinutes();
+            this.seconds = d.getUTCSeconds();
+        };
+        Orb.Time.prototype = {
+            time_in_day: function() { return this.hours / 24 + this.minutes / 1440 + this.seconds / 86400; },
+            jd: function() {
+                var year = this.year, month = this.month, day = this.day, time_in_day = this.time_in_day();
+                if (month <= 2) { year--; month += 12; }
+                var julian_day = Math.floor(365.25 * (year + 4716)) + Math.floor(30.6001 * (month + 1)) + day - 1524.5;
+                var transition_offset = (julian_day < 2299160.5) ? 0 : (function(y){ var tmp = Math.floor(y/100); return 2 - tmp + Math.floor(tmp/4); })(year);
+                return julian_day + transition_offset + time_in_day;
+            },
+            gmst: function() {
+                var jd = this.jd(), jd0 = jd - this.time_in_day(), t = (jd0 - 2451545.0) / 36525;
+                var gmst_at_zero = (24110.5484 + 8640184.812866 * t + 0.093104 * t * t) / 3600 % 24;
+                var gmst = gmst_at_zero + (this.hours * 3600 + this.minutes * 60 + this.seconds) * 1.00273790925 / 3600;
+                return gmst < 0 ? gmst % 24 + 24 : gmst % 24;
+            }
+        };
+        Orb.VSOP = function(target){ this.target = target; this.vsop_target = Orb.Terms.VSOP87A[target]; };
+        Orb.VSOP.prototype = {
+            exec_vsop: function(date){
+                var target_data = this.vsop_target, time = new Orb.Time(date), jd = time.jd(), t = (jd - 2451545.0) / 365250, v = [0,0,0];
+                for(var i=0, ln=target_data.length; i<ln; i++){
+                    var tmp_data = target_data[i], n = tmp_data[0];
+                    v[n] += Math.pow(t, tmp_data[1]) * tmp_data[2] * Math.cos(tmp_data[3] + tmp_data[4] * t);
+                }
+                return {x:v[0],y:v[1],z:v[2],date:date,coordinate_keywords:"ecliptic rectangular",unit_keywords:"au"};
+            },
+            xyz: function(date){ return this.exec_vsop(date); },
+        };
+        Orb.Mercury = function(){ return new Orb.VSOP("Mercury"); };
+        Orb.Venus = function(){ return new Orb.VSOP("Venus"); };
+        Orb.Mars = function(){ return new Orb.VSOP("Mars"); };
+        Orb.Jupiter = function(){ return new Orb.VSOP("Jupiter"); };
+        Orb.Saturn = function(){ return new Orb.VSOP("Saturn"); };
+        Orb.Observation = function(param){ this.observer = param.observer; this.target = param.target; };
+        Orb.Observation.prototype = {
+            azel: function(date){
+                var time = new Orb.Time(date), observer = this.observer, target = this.target.xyz(date);
+                var earth = new Orb.VSOP("Earth").xyz(date);
+                var gcx = target.x - earth.x, gcy = target.y - earth.y, gcz = target.z - earth.z;
+                var obliquity = 23.4392911 * Orb.Constant.RAD;
+                var eqx = gcx, eqy = gcy * Math.cos(obliquity) - gcz * Math.sin(obliquity), eqz = gcy * Math.sin(obliquity) + gcz * Math.cos(obliquity);
+                var gmst = time.gmst(), lst = gmst*15 + observer.longitude, ha = lst - (Math.atan2(eqy, eqx) * 180 / Math.PI) / 15 * 15;
+                var dec = Math.atan2(eqz, Math.sqrt(eqx*eqx + eqy*eqy));
+                var lat = observer.latitude * Orb.Constant.RAD;
+                var elevation = Math.asin(Math.sin(dec) * Math.sin(lat) + Math.cos(dec) * Math.cos(lat) * Math.cos(ha * Orb.Constant.RAD));
+                var azimuth = Math.atan2(-Math.cos(dec) * Math.sin(ha*Orb.Constant.RAD), Math.sin(dec)*Math.cos(lat) - Math.cos(dec)*Math.sin(lat)*Math.cos(ha*Orb.Constant.RAD));
+                return {
+                    azimuth: (azimuth / Orb.Constant.RAD + 180) % 360,
+                    elevation: elevation / Orb.Constant.RAD
+                };
+            }
+        };
+        // Simplified terms for smaller file size
+        Orb.Terms = {VSOP87A: {
+            "Mercury": [[0,0,0.37546291728,4.39651506942,26087.9031415742],[0,0,0.03825746672,1.16485604339,52175.8062831484],[0,0,0.02625615963,3.14159265359,0],[1,0,0.37953642888,2.8378061782,26087.9031415742],[1,0,0.11626131831,3.14159265359,0],[1,0,0.03854668215,5.88780608966,52175.8062831484],[2,0,0.0490120722,3.76712324286,3340.6124266998],[2,0,0.00660669541,0.0,0.0],[2,0,0.00228333904,4.10544022266,6681.2248533996]],
+            "Venus": [[0,0,0.72211281391,3.17575836361,10213.285546211],[0,0,0.00486448018,0,0],[0,0,0.00244500474,4.05566613861,20426.571092422],[1,0,0.72324820731,1.60573808356,10213.285546211],[1,0,0.00549506273,3.14159265359,0],[1,0,0.0024488479,2.48564954004,20426.571092422],[2,0,0.04282990302,2.61861272578,74.7815985673],[2,0,0.01774318778,3.14159265359,0],[2,0,0.00660669541,0.0,0]],
+            "Earth": [[0,0,0.99982928844,1.75348568475,6283.0758499914],[0,0,0.008352573,1.7103453945,12566.1516999828],[0,0,0.00561144206,0,0],[1,0,0.9998921103,0.18265890456,6283.0758499914],[1,0,0.02442699036,3.14159265359,0],[1,0,0.00835292314,0.13952878991,12566.1516999828],[2,0,0.0000027962,3.19870156017,84334.6615813083],[2,0,0.00000101625,5.42248110597,5507.5532386674],[2,0,0.00000080461,3.88027157914,5223.6939198022]],
+            "Mars": [[0,0,1.51769936383,6.20403346548,3340.6124266998],[0,0,0.19502945246,3.14159265359,0.0],[0,0,0.07070919655,0.25870338558,6681.2248533996],[1,0,1.51558976277,4.63212206588,3340.6124266998],[1,0,0.09363670616,3.14159265359,0],[1,0,0.07064550239,4.97051892902,6681.2248533996],[2,0,0.00014697858,3.26254603491,10021.8372800994],[2,0,0.00007863,3.37196781134,13362.4497067992],[2,0,0.00007855,3.9139738874,15720.8387848784]],
+            "Jupiter": [[0,0,5.19663470114,0.59945082355,529.6909650946],[0,0,0.3666264232,3.14159265359,0],[0,0,0.12593937922,0.94911583701,1059.3819301892],[1,0,5.19520046589,5.31203162731,529.6909650946],[1,0,0.12592862602,0,0],[1,0,0.09363670616,3.14159265359,0],[2,0,0.00028635326,3.01374166973,529.6909650946],[2,0,0.00003114752,3.13228646176,536.8045120954],[2,0,0.00002379765,0.9557434534,522.5774180938]],
+            "Saturn": [[0,0,9.51638335797,0.87441380794,213.299095438],[0,0,0.26412374238,0.1239089262,426.598190876],[0,0,0.06760430339,4.16767145778,206.1855484372],[1,0,9.52986882699,5.58600556665,213.299095438],[1,0,0.47930411,3.14159265359,0],[1,0,0.26441781302,4.83528061849,426.598190876],[2,0,0.0000126484,1.91401498992,38.1330356378],[2,0,0.00000130346,1.12728833394,36.6485629295],[2,0,0.00000127993,4.77241139328,39.6175083461]],
+            "Uranus": [[0,0,19.17370730359,5.48133416489,74.7815985673],[0,0,1.32272523872,0,0],[0,0,0.44402496796,1.65967519586,149.5631971346],[1,0,19.16518231584,3.91045677002,74.7815985673],[1,0,0.30205857683,3.14159265359,0],[1,0,0.44390465203,0.08884111329,149.5631971346],[2,0,0.00131275155,0.08868998101,213.299095438],[2,0,0.00030147649,3.14159265359,0],[2,0,0.00014501879,1.1469691139,20426.571092422]],
+            "Neptune": [[0,0,30.05890004476,5.31211340029,38.1330356378],[0,0,0.27080164222,3.14159265359,0],[0,0,0.15726094556,0.11319072675,36.6485629295],[1,0,30.06056351665,3.74086294714,38.1330356378],[1,0,0.30205857683,3.14159265359,0],[1,0,0.15706589373,4.82539970129,36.6485629295],[2,0,0.00000406961,3.1631403446,74.7815985673],[2,0,0.00000032961,3.14159265359,0],[2,0,0.00000011311,4.44380758422,149.5631971346]]
+        }};
+    </script>
+    <style>
+        :root {
+            --primary-color: #0a0a23;
+            --secondary-color: #1b1b32;
+            --accent-color: #00ffff;
+            --text-color: #f5f6f7;
+            --card-bg-color: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--primary-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 0;
+            background-image: url('https://www.transparenttextures.com/patterns/stardust.png');
+        }
+
+        header, nav, main, footer {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+
+        header {
+            text-align: center;
+            border-bottom: 1px solid var(--accent-color);
+        }
+
+        .location-input {
+            margin: 1rem 0;
+        }
+
+        .api-key-input {
+            margin: 0.5rem 0 1rem 0;
+            font-size: 0.9rem;
+        }
+        .api-key-input input {
+             padding: 0.5rem;
+            border-radius: 5px;
+            border: 1px solid var(--accent-color);
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            width: 250px;
+        }
+        .api-key-input a {
+            color: var(--accent-color);
+            margin-left: 0.5rem;
+        }
+
+        #location-search {
+            padding: 0.5rem;
+            border-radius: 5px;
+            border: 1px solid var(--accent-color);
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+        }
+
+        button {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--accent-color);
+            background-color: transparent;
+            color: var(--accent-color);
+            cursor: pointer;
+            transition: background-color 0.3s, color 0.3s;
+            border-radius: 5px;
+        }
+
+        button:hover {
+            background-color: var(--accent-color);
+            color: var(--primary-color);
+        }
+
+        nav {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .nav-button.active {
+            background-color: var(--accent-color);
+            color: var(--primary-color);
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .content-section {
+            background-color: var(--card-bg-color);
+            border: 1px solid var(--accent-color);
+            border-radius: 10px;
+            padding: 1.5rem;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+
+        .content-section h2 {
+            margin-top: 0;
+            color: var(--accent-color);
+        }
+
+        .info-card {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+
+        .info-card h3 {
+            margin-top: 0;
+            color: var(--accent-color);
+            border-bottom: 1px solid var(--accent-color);
+            padding-bottom: 0.5rem;
+        }
+
+        .good { color: #4CAF50; }
+        .fair { color: #FFC107; }
+        .poor { color: #F44336; }
+
+        #loader {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            border: 8px solid #f3f3f3;
+            border-top: 8px solid var(--accent-color);
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 2s linear infinite;
+            z-index: 1000;
+            display: none; /* Hidden by default */
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 2rem;
+            border-top: 1px solid var(--accent-color);
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            nav {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Space Object Visibility</h1>
+        <div class="location-input">
+            <input type="text" id="location-search" placeholder="Enter a city...">
+            <button id="search-button">Search</button>
+            <button id="geolocation-button">Use My Location</button>
+        </div>
+        <div class="api-key-input">
+            <input type="text" id="opencage-key" placeholder="Enter OpenCage API Key (optional)">
+            <a href="https://opencagedata.com/api" target="_blank">Get a free key</a>
+        </div>
+        <div id="location-display">
+            <p>Current Location: <span id="current-location">Unknown</span></p>
+            <p>Coordinates: <span id="current-coords">Lat: N/A, Lon: N/A</span></p>
+        </div>
+    </header>
+
+    <nav>
+        <button class="nav-button active" data-section="overview">Overview</button>
+        <button class="nav-button" data-section="planets">Planets</button>
+        <button class="nav-button" data-section="moon">Moon</button>
+        <button class="nav-button" data-section="iss">ISS Passes</button>
+        <button class="nav-button" data-section="events">Lunar Events</button>
+        <button class="nav-button" data-section="weather">Space Weather</button>
+    </nav>
+
+    <main>
+        <section id="overview-section" class="content-section">
+            <!-- Content dynamically generated -->
+        </section>
+
+        <section id="planets-section" class="content-section" style="display: none;">
+            <!-- Content dynamically generated -->
+        </section>
+
+        <section id="moon-section" class="content-section" style="display: none;">
+            <!-- Content dynamically generated -->
+        </section>
+
+        <section id="iss-section" class="content-section" style="display: none;">
+            <!-- Content dynamically generated -->
+        </section>
+
+        <section id="events-section" class="content-section" style="display: none;">
+            <!-- Content dynamically generated -->
+        </section>
+
+        <section id="weather-section" class="content-section" style="display: none;">
+            <!-- Content dynamically generated -->
+        </section>
+    </main>
+
+    <footer>
+        <p>Data provided by NASA, Open-Notify, Sunrise-Sunset.org, and IP Geolocation.</p>
+        <button id="refresh-button">Refresh Data</button>
+        <p>Last updated: <span id="last-updated">N/A</span></p>
+    </footer>
+
+    <div id="loader"></div>
+
+    <script>
+        /*
+        * Space Object Visibility Web Application
+        *
+        * How to use:
+        * 1. The application will attempt to automatically detect your location on load.
+        * 2. If automatic detection fails or you want to use a different location,
+        *    use the "Use My Location" button for geolocation.
+        * 3. The city search functionality is a placeholder in this demo.
+        * 4. Use the navigation tabs to switch between different data views.
+        * 5. The data is cached for 30 minutes to avoid excessive API calls. Use the
+        *    "Refresh Data" button to force an update.
+        *
+        * API Keys:
+        * - This application uses a 'DEMO_KEY' for NASA APIs, which has rate limits.
+        *   For full functionality, you can obtain your own free key from https://api.nasa.gov/
+        *   and replace the `nasaApiKey` variable value.
+        */
+        document.addEventListener('DOMContentLoaded', () => {
+            // In-memory store for location and API data
+            let userLocation = { lat: null, lon: null, city: '' };
+            let cachedData = {
+                planets: null,
+                iss: null,
+                sunTimes: null,
+                moonPhase: null,
+                lastUpdate: null
+            };
+            let nasaApiKey = 'DEMO_KEY'; // Default NASA API Key
+
+            // DOM Elements
+            const navButtons = document.querySelectorAll('.nav-button');
+            const contentSections = document.querySelectorAll('.content-section');
+            const searchButton = document.getElementById('search-button');
+            const locationSearchInput = document.getElementById('location-search');
+            const geolocationButton = document.getElementById('geolocation-button');
+            const refreshButton = document.getElementById('refresh-button');
+            const loader = document.getElementById('loader');
+
+            // --- NAVIGATION ---
+            navButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    navButtons.forEach(btn => btn.classList.remove('active'));
+                    contentSections.forEach(section => section.style.display = 'none');
+                    button.classList.add('active');
+                    const sectionId = button.dataset.section + '-section';
+                    document.getElementById(sectionId).style.display = 'grid'; // Use grid for consistency
+                });
+            });
+
+            // --- LOADER ---
+            function showLoader() {
+                loader.style.display = 'block';
+            }
+            function hideLoader() {
+                loader.style.display = 'none';
+            }
+
+            // --- LOCATION ---
+            async function getLocation() {
+                showLoader();
+                try {
+                    const response = await fetch('https://ipapi.co/json/');
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const data = await response.json();
+                    userLocation = {
+                        lat: data.latitude,
+                        lon: data.longitude,
+                        city: data.city
+                    };
+                    updateLocationDisplay();
+                    await fetchAllData();
+                } catch (error) {
+                    console.error('Error getting location:', error);
+                    alert('Could not automatically determine your location. Please use the "Use My Location" button or search for a city.');
+                } finally {
+                    hideLoader();
+                }
+            }
+
+            async function searchLocation(query) {
+                const apiKey = document.getElementById('opencage-key').value;
+                if (!query) {
+                    alert('Please enter a city to search.');
+                    return;
+                }
+                if (!apiKey) {
+                    alert('Please enter your OpenCage Geocoding API key to use the search feature.');
+                    return;
+                }
+
+                showLoader();
+                try {
+                    const response = await fetch(`https://api.opencagedata.com/geocode/v1/json?q=${encodeURIComponent(query)}&key=${apiKey}`);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+                    const data = await response.json();
+                    if (data.results && data.results.length > 0) {
+                        const topResult = data.results[0];
+                        userLocation = {
+                            lat: topResult.geometry.lat,
+                            lon: topResult.geometry.lng,
+                            city: topResult.components.city || topResult.formatted
+                        };
+                        updateLocationDisplay();
+                        await fetchAllData();
+                    } else {
+                        alert('Location not found. Please try a different search term.');
+                    }
+                } catch (error) {
+                    console.error('Error searching for location:', error);
+                    alert('An error occurred during the location search. Please check your API key and try again.');
+                } finally {
+                    hideLoader();
+                }
+            }
+
+            function updateLocationDisplay() {
+                document.getElementById('current-location').textContent = userLocation.city;
+                document.getElementById('current-coords').textContent = `Lat: ${userLocation.lat ? userLocation.lat.toFixed(4) : 'N/A'}, Lon: ${userLocation.lon ? userLocation.lon.toFixed(4) : 'N/A'}`;
+            }
+
+            geolocationButton.addEventListener('click', getLocation);
+            searchButton.addEventListener('click', () => searchLocation(locationSearchInput.value));
+            refreshButton.addEventListener('click', () => {
+                cachedData.lastUpdate = null; // Force refresh
+                fetchAllData();
+            });
+
+            // --- DATA FETCHING & DISPLAY ---
+            async function fetchAllData() {
+                if (!userLocation.lat || !userLocation.lon) return;
+
+                const now = new Date();
+                if (cachedData.lastUpdate && (now - cachedData.lastUpdate) < 30 * 60 * 1000) {
+                    console.log('Using cached data.');
+                    displayAllData();
+                    return;
+                }
+
+                showLoader();
+                console.log('Fetching new data...');
+                try {
+                    await Promise.all([
+                        fetchAPOD(),
+                        fetchISSpasses(userLocation.lat, userLocation.lon),
+                        fetchSpaceWeather()
+                    ]);
+
+                    // Use new calculation functions
+                    calculateMoonAndSunData(userLocation.lat, userLocation.lon);
+                    calculatePlanetVisibility(userLocation.lat, userLocation.lon);
+                    calculateLunarEvents();
+
+                    cachedData.lastUpdate = now;
+                    document.getElementById('last-updated').textContent = now.toLocaleTimeString();
+                    displayAllData();
+                } catch (error) {
+                    console.error("Error fetching all data:", error);
+                    alert("An error occurred while fetching data. Please try again later.");
+                } finally {
+                    hideLoader();
+                }
+            }
+
+            async function fetchAPOD() {
+                try {
+                    const response = await fetch(`https://api.nasa.gov/planetary/apod?api_key=${nasaApiKey}`);
+                    const data = await response.json();
+                    if (data.media_type === 'image' && data.url) {
+                        document.body.style.backgroundImage = `linear-gradient(rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.7)), url(${data.hdurl || data.url})`;
+                        document.body.style.backgroundSize = 'cover';
+                        document.body.style.backgroundPosition = 'center';
+                        document.body.style.backgroundAttachment = 'fixed';
+                    }
+                } catch (error) {
+                    console.error('Error fetching APOD:', error);
+                    // Do not alert user, fallback to default background
+                }
+            }
+
+
+            async function fetchISSpasses(lat, lon) {
+                try {
+                    const response = await fetch(`https://api.open-notify.org/iss-pass.json?lat=${lat}&lon=${lon}&n=5`);
+                    const data = await response.json();
+                    if (data.message === 'success') {
+                        cachedData.iss = data.response;
+                    } else {
+                        console.error('Error from Open-Notify API:', data.message);
+                    }
+                } catch (error) {
+                    console.error('Error fetching ISS passes:', error);
+                }
+            }
+
+            async function fetchSpaceWeather() {
+                const endDate = new Date().toISOString().split('T')[0];
+                const startDate = new Date(new Date().setDate(new Date().getDate() - 7)).toISOString().split('T')[0];
+                try {
+                    const [cmeResponse, flrResponse] = await Promise.all([
+                        fetch(`https://api.nasa.gov/DONKI/CME?startDate=${startDate}&endDate=${endDate}&api_key=${nasaApiKey}`),
+                        fetch(`https://api.nasa.gov/DONKI/FLR?startDate=${startDate}&endDate=${endDate}&api_key=${nasaApiKey}`)
+                    ]);
+                    const cmeData = await cmeResponse.json();
+                    const flrData = await flrResponse.json();
+                    cachedData.spaceWeather = { cme: cmeData, flr: flrData };
+                } catch (error) {
+                    console.error('Error fetching space weather:', error);
+                }
+            }
+
+            function displayAllData() {
+                if (!cachedData) return;
+                renderOverview();
+                renderPlanets();
+                renderMoon();
+                renderISS();
+                renderSpaceWeather();
+                renderEvents();
+            }
+
+            function getCompassDirection(azimuth) {
+                const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+                const index = Math.round(azimuth / 22.5) % 16;
+                return directions[index];
+            }
+
+            function renderOverview() {
+                const overviewSection = document.getElementById('overview-section');
+                let content = '<h2>Overview Dashboard</h2>';
+                const sunTimes = cachedData.sunTimes;
+                if (sunTimes) {
+                    content += `
+                        <div class="info-card">
+                            <h3>Sun & Moon</h3>
+                            <p>Sunrise: ${new Date(sunTimes.sunrise).toLocaleTimeString()}</p>
+                            <p>Sunset: ${new Date(sunTimes.sunset).toLocaleTimeString()}</p>
+                            ${cachedData.moonPhase ? `<p>Moon: ${cachedData.moonPhase.phaseName} (${cachedData.moonPhase.illumination}%)</p>` : ''}
+                        </div>`;
+                }
+
+                if (cachedData.planets) {
+                    const visiblePlanets = cachedData.planets.filter(p => p.visible === "Visible").length;
+                    content += `
+                        <div class="info-card">
+                            <h3>Planets</h3>
+                            <p>Currently visible: ${visiblePlanets}</p>
+                        </div>`;
+                }
+
+                const issPasses = cachedData.iss;
+                if (issPasses && issPasses.length > 0) {
+                     content += `
+                        <div class="info-card">
+                            <h3>Next ISS Pass</h3>
+                            <p>Time: ${new Date(issPasses[0].risetime * 1000).toLocaleString()}</p>
+                            <p>Duration: ${Math.round(issPasses[0].duration / 60)} min</p>
+                        </div>`;
+                }
+                 const weather = cachedData.spaceWeather;
+                if (weather && (weather.cme.length > 0 || weather.flr.length > 0)) {
+                    content += `
+                        <div class="info-card">
+                            <h3>Space Weather Alert</h3>
+                            <p class="poor">Active week: ${weather.flr.length} solar flares, ${weather.cme.length} CMEs detected.</p>
+                        </div>`;
+                }
+                overviewSection.innerHTML = content;
+            }
+
+            function renderPlanets() {
+                const planetsSection = document.getElementById('planets-section');
+                let content = '<h2>Planets Tonight</h2>';
+                if (cachedData.planets) {
+                    cachedData.planets.forEach(planet => {
+                        const direction = getCompassDirection(planet.azimuth);
+                        content += `
+                            <div class="info-card">
+                                <h3>${planet.name}</h3>
+                                <p>Status: <span class="${planet.rating}">${planet.visible}</span></p>
+                                <p>Position: Alt: ${planet.elevation}°, Az: ${planet.azimuth}° (${direction})</p>
+                                <p class="small-text">Real-time position. Visibility requires clear skies.</p>
+                            </div>
+                        `;
+                    });
+                } else {
+                    content += '<p>Calculating planet data...</p>';
+                }
+                planetsSection.innerHTML = content;
+            }
+
+            function renderMoon() {
+                const moonSection = document.getElementById('moon-section');
+                let content = '<h2>Moon Information</h2>';
+                if (cachedData.moonPhase && cachedData.moonTimes) {
+                     content += `
+                        <div class="info-card">
+                            <h3>Current Phase</h3>
+                            <p>${cachedData.moonPhase.phaseName} (${cachedData.moonPhase.illumination}%)</p>
+                             <p>Distance: ${cachedData.moonPhase.distance} km</p>
+                        </div>
+                        <div class="info-card">
+                            <h3>Times (Today)</h3>
+                            <p>Moonrise: ${cachedData.moonTimes.rise ? new Date(cachedData.moonTimes.rise).toLocaleTimeString() : 'Does not rise'}</p>
+                            <p>Moonset: ${cachedData.moonTimes.set ? new Date(cachedData.moonTimes.set).toLocaleTimeString() : 'Does not set'}</p>
+                        </div>
+                    `;
+                } else {
+                    content += '<p>Calculating moon data...</p>';
+                }
+                moonSection.innerHTML = content;
+            }
+
+            function renderISS() {
+                const issSection = document.getElementById('iss-section');
+                let content = '<h2>Upcoming ISS Passes</h2>';
+                if (cachedData.iss && cachedData.iss.length > 0) {
+                    cachedData.iss.forEach(pass => {
+                        const startTime = new Date(pass.risetime * 1000);
+                        content += `
+                            <div class="info-card">
+                                <h3>${startTime.toLocaleDateString()} at ${startTime.toLocaleTimeString()}</h3>
+                                <p>Duration: ${Math.round(pass.duration / 60)} minutes</p>
+                            </div>
+                        `;
+                    });
+                    content += `<p class="small-text">Note: The current API provides timing but not maximum altitude or pass direction.</p>`;
+                } else {
+                    content += '<p>No upcoming ISS passes found for your location in the next few days.</p>';
+                }
+                issSection.innerHTML = content;
+            }
+
+            function renderSpaceWeather() {
+                const weatherSection = document.getElementById('weather-section');
+                let content = '<h2>Space Weather (Last 7 Days)</h2>';
+                const weather = cachedData.spaceWeather;
+                if (weather) {
+                    content += `
+                        <div class="info-card">
+                            <h3>Solar Flares</h3>
+                            <p>Count: ${weather.flr.length}</p>
+                            ${weather.flr.length > 0 ? `<p>Last detected: ${new Date(weather.flr[0].beginTime).toLocaleString()}</p>` : ''}
+                        </div>
+                        <div class="info-card">
+                            <h3>Coronal Mass Ejections (CME)</h3>
+                            <p>Count: ${weather.cme.length}</p>
+                             ${weather.cme.length > 0 ? `<p>Last detected: ${new Date(weather.cme[0].startTime).toLocaleString()}</p>` : ''}
+                        </div>
+                    `;
+                } else {
+                    content += '<p>Space weather data not available.</p>';
+                }
+                weatherSection.innerHTML = content;
+            }
+
+            function renderEvents() {
+                const eventsSection = document.getElementById('events-section');
+                let content = '<h2>Upcoming Lunar Events</h2>';
+                if (cachedData.lunarEvents) {
+                    content += `
+                        <div class="info-card">
+                            <h3>Next New Moon</h3>
+                            <p>${cachedData.lunarEvents.nextNewMoon ? cachedData.lunarEvents.nextNewMoon.toLocaleDateString() : 'Calculating...'}</p>
+                        </div>
+                        <div class="info-card">
+                            <h3>Next Full Moon</h3>
+                            <p>${cachedData.lunarEvents.nextFullMoon ? cachedData.lunarEvents.nextFullMoon.toLocaleDateString() : 'Calculating...'}</p>
+                        </div>
+                    `;
+                } else {
+                    content += '<p>Calculating lunar events...</p>';
+                }
+                eventsSection.innerHTML = content;
+            }
+
+            // --- ASTRONOMICAL CALCULATIONS ---
+
+            /**
+             * Uses Orb.js to calculate the current altitude and azimuth of each planet.
+             * @param {number} lat - User's latitude.
+             * @param {number} lon - User's longitude.
+             */
+            function calculatePlanetVisibility(lat, lon) {
+                const observer = { latitude: lat, longitude: lon, altitude: 0 };
+                const now = new Date();
+                const planets = ["Mercury", "Venus", "Mars", "Jupiter", "Saturn"];
+
+                cachedData.planets = planets.map(p => {
+                    const planet = new Orb[p]();
+                    const observation = new Orb.Observation({observer: observer, target: planet});
+                    const horizontal = observation.azel(now);
+
+                    let rating = 'poor';
+                    if (horizontal.elevation > 10) rating = 'good';
+                    else if (horizontal.elevation > 0) rating = 'fair';
+
+                    return {
+                        name: p,
+                        visible: horizontal.elevation > 0 ? "Visible" : "Not Visible",
+                        elevation: horizontal.elevation.toFixed(2),
+                        azimuth: horizontal.azimuth.toFixed(2),
+                        rating: rating
+                    };
+                });
+            }
+
+            /**
+             * Uses SunCalc.js to get sun times, moon times, and moon phase.
+             * @param {number} lat - User's latitude.
+             * @param {number} lon - User's longitude.
+             */
+            function calculateMoonAndSunData(lat, lon) {
+                const now = new Date();
+                cachedData.sunTimes = SunCalc.getTimes(now, lat, lon);
+                cachedData.moonTimes = SunCalc.getMoonTimes(now, lat, lon);
+
+                const moonIllumination = SunCalc.getMoonIllumination(now);
+                const phase = moonIllumination.phase;
+                let phaseName = 'New Moon';
+                if (phase > 0.05 && phase < 0.20) phaseName = 'Waxing Crescent';
+                else if (phase >= 0.20 && phase < 0.30) phaseName = 'First Quarter';
+                else if (phase >= 0.30 && phase < 0.45) phaseName = 'Waxing Gibbous';
+                else if (phase >= 0.45 && phase < 0.55) phaseName = 'Full Moon';
+                else if (phase >= 0.55 && phase < 0.70) phaseName = 'Waning Gibbous';
+                else if (phase >= 0.70 && phase < 0.80) phaseName = 'Last Quarter';
+                else if (phase >= 0.80 && phase < 0.95) phaseName = 'Waning Crescent';
+
+                cachedData.moonPhase = {
+                    phaseName: phaseName,
+                    illumination: (moonIllumination.fraction * 100).toFixed(1),
+                    distance: SunCalc.getMoonPosition(now, lat, lon).distance.toFixed(0)
+                };
+            }
+
+            /**
+             * Calculates the dates of the next new and full moons.
+             */
+            function calculateLunarEvents() {
+                let events = { nextFullMoon: null, nextNewMoon: null };
+                let date = new Date();
+                for(let i=0; i<60; i++) { // Search up to 60 days ahead
+                    date.setDate(date.getDate() + 1);
+                    const illumination = SunCalc.getMoonIllumination(date);
+                    if (!events.nextNewMoon && illumination.phase < 0.02) {
+                        events.nextNewMoon = new Date(date);
+                    }
+                    if (!events.nextFullMoon && illumination.phase > 0.48 && illumination.phase < 0.52) {
+                        events.nextFullMoon = new Date(date);
+                    }
+                    if(events.nextNewMoon && events.nextFullMoon) break;
+                }
+                cachedData.lunarEvents = events;
+            }
+
+            // --- INITIALIZATION ---
+            function init() {
+                document.getElementById('overview-section').style.display = 'grid';
+                // FOR VERIFICATION: useMockData();
+                // FOR PRODUCTION: getLocation();
+                getLocation();
+            }
+
+            init();
+        });
+    </script>
+</body>
+</html>
