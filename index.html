@@ -419,8 +419,8 @@
             <button id="search-button">Search</button>
             <button id="geolocation-button">Use My Location</button>
         </div>
-        <div class="api-key-input">
-            <input type="text" id="opencage-key" placeholder="Enter OpenCage API Key (optional)">
+        <div class="api-key-input" style="display: none">
+            <input type="text" id="opencage-key" placeholder="Enter OpenCage API Key (optional)" value="fb2983016120464fb59e46bcc9a373bc">
             <a href="https://opencagedata.com/api" target="_blank">Get a free key</a>
         </div>
         <div id="location-display">
@@ -500,7 +500,7 @@
                 moonPhase: null,
                 lastUpdate: null
             };
-            let nasaApiKey = 'DEMO_KEY'; // Default NASA API Key
+            let nasaApiKey = 'slff3bYOeeUBbJFsSQj2VvTovrOM3mPU1dsnC0uu'; // Default NASA API Key
 
             // DOM Elements
             const navButtons = document.querySelectorAll('.nav-button');
@@ -531,8 +531,33 @@
             }
 
             // --- LOCATION ---
-            async function getLocation() {
+      async function getLocation() {
                 showLoader();
+                
+                // Try browser geolocation first
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        async (position) => {
+                            userLocation = {
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                city: 'Your Location'
+                            };
+                            updateLocationDisplay();
+                            await fetchAllData();
+                            hideLoader();
+                        },
+                        async (error) => {
+                            console.error('Geolocation error:', error);
+                            // Fallback to IP geolocation
+                            await tryIPGeolocation();
+                        }
+                    );
+                } else {
+                    await tryIPGeolocation();
+                }
+            }
+            async function tryIPGeolocation() {
                 try {
                     const response = await fetch('https://ipapi.co/json/');
                     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -546,12 +571,19 @@
                     await fetchAllData();
                 } catch (error) {
                     console.error('Error getting location:', error);
-                    alert('Could not automatically determine your location. Please use the "Use My Location" button or search for a city.');
+                    // Use default location (Kochi, Kerala)
+                    userLocation = {
+                        lat: 9.9312,
+                        lon: 76.2673,
+                        city: 'Kochi, Kerala (Default)'
+                    };
+                    alert('Could not automatically detect location. Using Kochi, Kerala as default. Please use "Use My Location" or search for your city.');
+                    updateLocationDisplay();
+                    await fetchAllData();
                 } finally {
                     hideLoader();
                 }
             }
-
             async function searchLocation(query) {
                 const apiKey = document.getElementById('opencage-key').value;
                 if (!query) {
